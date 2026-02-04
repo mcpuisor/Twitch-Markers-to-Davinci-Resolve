@@ -43,10 +43,13 @@ class TwitchToXMLConverter:
                     timestamp = row[0].strip()
                     role = row[1].strip()
                     username = row[2].strip()
+                    # Get description if present (4th column)
+                    description = row[3].strip() if len(row) > 3 else ""
                     markers.append({
                         'timestamp': timestamp,
                         'role': role,
-                        'username': username
+                        'username': username,
+                        'description': description
                     })
         
         if not markers:
@@ -90,11 +93,18 @@ class TwitchToXMLConverter:
         for marker in markers:
             td = self.parse_timestamp(marker['timestamp'])
             frame_number = self.timedelta_to_frames(td)
-            marker_name = f"by {marker['username']} [{marker['role']}]"
+            
+            # Build marker name with description if present
+            if marker['description']:
+                marker_name = f"{marker['description']} - by {marker['username']} [{marker['role']}]"
+                marker_comment = f"{marker['description']} (Twitch marker by {marker['username']})"
+            else:
+                marker_name = f"by {marker['username']} [{marker['role']}]"
+                marker_comment = f"Twitch marker by {marker['username']}"
             
             xml_lines.append('    <marker>')
             xml_lines.append(f'      <n>{self._escape_xml(marker_name)}</n>')
-            xml_lines.append(f'      <comment>Twitch marker by {self._escape_xml(marker["username"])}</comment>')
+            xml_lines.append(f'      <comment>{self._escape_xml(marker_comment)}</comment>')
             xml_lines.append(f'      <in>{frame_number}</in>')
             xml_lines.append(f'      <out>{frame_number + 1}</out>')
             xml_lines.append('    </marker>')
@@ -490,6 +500,22 @@ class ConverterGUI:
             fg=self.text_secondary
         ).pack(side='left', padx=(10, 0))
         
+        # Info box with rounded corners
+        info_canvas = tk.Canvas(card_content, width=540, height=40, 
+                               bg=self.bg_card, highlightthickness=0)
+        info_canvas.pack(pady=(0, 15))
+        
+        info_canvas.create_polygon(
+            [10, 0, 530, 0, 540, 0, 540, 10, 540, 30, 540, 40, 
+             530, 40, 10, 40, 0, 40, 0, 30, 0, 10, 0, 0],
+            fill=self.bg_secondary, smooth=True
+        )
+        info_canvas.create_text(
+            270, 20,
+            text="💡 Most Twitch streams use 30 fps or 60 fps",
+            font=('SF Pro Display', 10) if self._font_exists('SF Pro Display') else ('Arial', 10),
+            fill=self.text_muted
+        )
         
         # Divider
         tk.Frame(card_content, bg='#3a3a50', height=1).pack(fill='x', pady=15)

@@ -46,10 +46,13 @@ class TwitchToXMLConverter:
                     timestamp = row[0].strip()
                     role = row[1].strip()
                     username = row[2].strip()
+                    # Get description if present (4th column)
+                    description = row[3].strip() if len(row) > 3 else ""
                     markers.append({
                         'timestamp': timestamp,
                         'role': role,
-                        'username': username
+                        'username': username,
+                        'description': description
                     })
         
         if not markers:
@@ -93,11 +96,18 @@ class TwitchToXMLConverter:
         for marker in markers:
             td = self.parse_timestamp(marker['timestamp'])
             frame_number = self.timedelta_to_frames(td)
-            marker_name = f"by {marker['username']} [{marker['role']}]"
+            
+            # Build marker name with description if present
+            if marker['description']:
+                marker_name = f"{marker['description']} - by {marker['username']} [{marker['role']}]"
+                marker_comment = f"{marker['description']} (Twitch marker by {marker['username']})"
+            else:
+                marker_name = f"by {marker['username']} [{marker['role']}]"
+                marker_comment = f"Twitch marker by {marker['username']}"
             
             xml_lines.append('    <marker>')
             xml_lines.append(f'      <n>{self._escape_xml(marker_name)}</n>')
-            xml_lines.append(f'      <comment>Twitch marker by {self._escape_xml(marker["username"])}</comment>')
+            xml_lines.append(f'      <comment>{self._escape_xml(marker_comment)}</comment>')
             xml_lines.append(f'      <in>{frame_number}</in>')
             xml_lines.append(f'      <out>{frame_number + 1}</out>')
             xml_lines.append('    </marker>')
