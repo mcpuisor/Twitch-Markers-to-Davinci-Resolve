@@ -41,12 +41,12 @@ Convert Twitch stream markers to DaVinci Resolve timeline markers in seconds.
 ### Quick Start
 
 **GUI Version** (Easiest):
-1. ```bash
+```bash
 python3 twitch_markers_video_gui.py
 ```
-2. Select the .csv accordingly
-3. Select the video file.
-4. You get the .xml that you can import in DaVinci as described below.
+1. Select the .csv accordingly
+2. Select the video file.
+3. You get the .xml that you can import in DaVinci as described below.
 
 **CLI Version** (No GUI needed):
 ```bash
