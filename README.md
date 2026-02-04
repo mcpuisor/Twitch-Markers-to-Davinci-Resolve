@@ -102,11 +102,63 @@ Select your .xml file
 
 | Tool | Description | Use When |
 |------|-------------|----------|
-| `twitch_markers_xml_gui.py` ⭐ | GUI with framerate selector | You want easy point-and-click |
+| `twitch_markers_with_video_gui.py` 🆕⭐ | **NEW:** Timeline with video + markers | Want video already placed - ready to edit! |
+| `twitch_markers_xml_gui.py` | GUI with framerate selector | You want easy point-and-click |
 | `twitch_markers_xml_cli.py` | CLI with framerate prompt | No GUI or automation |
 | `twitch_markers_edl_gui.py` | EDL format GUI | Need EDL compatibility |
 | `twitch_markers_edl_cli.py` | EDL format CLI | EDL + automation |
 | `check_video_framerate.py` | Framerate detector | Check video fps first |
+
+### 🆕 NEW: Timeline with Video Already Placed! ⭐
+
+**Use `twitch_markers_with_video_gui.py` for the fastest workflow!**
+
+This new tool works differently from the standard converters:
+
+**Standard Workflow:**
+```
+Convert CSV → Import XML → Empty timeline with markers
+→ You manually add video → Markers align
+```
+
+**NEW "With Video" Workflow:**
+```
+Convert CSV + Video → Import XML → Timeline with video ALREADY there!
+→ Markers already positioned → Start editing immediately!
+```
+
+**Key Differences:**
+- ✅ **Auto-detects framerate** from your video (no manual selection needed!)
+- ✅ **Video already placed** on timeline
+- ✅ **Markers already positioned** on the clip
+- ✅ **Ready to edit immediately** - no extra steps
+- ⚠️ **Requires:** Both CSV file AND video file as input
+- ⚠️ **Requires:** ffprobe installed (comes with ffmpeg)
+
+**How to Use:**
+```bash
+python3 twitch_markers_with_video_gui.py
+
+1. Choose your CSV markers file
+2. Choose your source video file
+3. Click "Create XML with Video"
+4. Import to Resolve: File → Import → Timeline → Import XML
+5. Timeline appears with video + markers already there!
+6. Start editing immediately! 🎬
+```
+
+**When to Use:**
+- ✅ You want the absolute fastest workflow
+- ✅ You have the video file ready
+- ✅ You want to skip manual video placement
+- ✅ You're working with multiple stream clips
+
+**Use standard converter if:**
+- You don't have the video file yet
+- You want maximum flexibility
+- You prefer adding video manually
+
+---
 
 ### Which Format?
 
@@ -285,16 +337,23 @@ done
 Your Twitch CSV should look like:
 
 ```csv
-4:08:26,Broadcaster,StreamerName,
-4:58:22,Broadcaster,StreamerName,
-10:12:55,Editor,EditorName,
+4:08:26,Broadcaster,StreamerName,Epic clutch moment!
+4:58:22,Broadcaster,StreamerName,Funny reaction
+10:12:55,Editor,EditorName,Good highlight clip
 10:26:55,Moderator,ModName,
 ```
 
-**Format:** `timestamp,role,username,`
-- Timestamp: `h:mm:ss` or `hh:mm:ss`
-- Role: Broadcaster, Editor, Moderator, etc.
-- Username: Person who created marker
+**Format:** `timestamp,role,username,description`
+- **Timestamp:** `h:mm:ss` or `hh:mm:ss`
+- **Role:** Broadcaster, Editor, Moderator, etc.
+- **Username:** Person who created marker
+- **Description:** Optional text (shows in DaVinci Resolve!) ⭐
+
+**In DaVinci Resolve, you'll see:**
+- With description: `"Epic clutch moment! - by StreamerName [Broadcaster]"`
+- Without description: `"by ModName [Moderator]"`
+
+**Pro tip:** Add descriptions when creating markers on Twitch - they help you remember what each marker is about!
 
 ---
 
