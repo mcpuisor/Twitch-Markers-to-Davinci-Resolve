@@ -1,25 +1,127 @@
 #!/usr/bin/env python3
 """
-Twitch CSV to DaVinci Resolve Markers with Linked Video (FCP XML Format - GUI)
-Creates timeline with video clip and markers already positioned
+Twitch CSV to DaVinci Resolve XML Converter (With Video + Audio)
+Converts Twitch stream markers from CSV format to FCP XML format
+and links them to a video file with its embedded audio.
+
+CSV Format: timestamp,role,username,description(optional)
+Example: 4:08:26,Broadcaster,StreamerJoe,Epic clutch moment!
 """
 
 import csv
 import os
+import sys
+import json
 import subprocess
+import html
 from pathlib import Path
+from datetime import timedelta
 import tkinter as tk
 from tkinter import filedialog, messagebox
-from datetime import datetime, timedelta
-import urllib.parse
 
 
-class TwitchToXMLWithVideoConverter:
-    def __init__(self, framerate=25):
-        self.framerate = framerate
+# ─── Framerate Rounding ───────────────────────────────────────────────────────
+
+COMMON_FRAMERATES = {
+    23.976: 24, 23.98: 24, 24.0: 24,
+    25.0: 25,
+    29.97: 30, 30.0: 30,
+    50.0: 50,
+    59.94: 60, 60.0: 60,
+}
+
+def round_framerate(fps):
+    """Round detected framerate to nearest common value."""
+    fps_rounded = round(fps, 2)
+    if fps_rounded in COMMON_FRAMERATES:
+        return COMMON_FRAMERATES[fps_rounded]
+    # Find closest common framerate
+    closest = min(COMMON_FRAMERATES.keys(), key=lambda x: abs(x - fps))
+    if abs(closest - fps) < 1.0:
+        return COMMON_FRAMERATES[closest]
+    return int(round(fps))
+
+
+# ─── Video Info Detection ─────────────────────────────────────────────────────
+
+def detect_video_info(video_path):
+    """Use ffprobe to detect video properties."""
+    try:
+        cmd = [
+            'ffprobe', '-v', 'quiet', '-print_format', 'json',
+            '-show_streams', '-show_format', str(video_path)
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            raise RuntimeError(f"ffprobe error: {result.stderr}")
         
+        data = json.loads(result.stdout)
+        
+        video_stream = None
+        audio_stream = None
+        for stream in data.get('streams', []):
+            if stream.get('codec_type') == 'video' and video_stream is None:
+                video_stream = stream
+            elif stream.get('codec_type') == 'audio' and audio_stream is None:
+                audio_stream = stream
+        
+        if not video_stream:
+            raise RuntimeError("No video stream found in file")
+        
+        # Parse framerate
+        r_frame_rate = video_stream.get('r_frame_rate', '30/1')
+        if '/' in r_frame_rate:
+            num, den = map(int, r_frame_rate.split('/'))
+            raw_fps = num / den if den != 0 else 30.0
+        else:
+            raw_fps = float(r_frame_rate)
+        
+        fps = round_framerate(raw_fps)
+        
+        # Parse duration
+        duration = float(data.get('format', {}).get('duration', 
+                         video_stream.get('duration', '0')))
+        
+        # Width/height
+        width = int(video_stream.get('width', 1920))
+        height = int(video_stream.get('height', 1080))
+        
+        # Audio info
+        has_audio = audio_stream is not None
+        audio_channels = int(audio_stream.get('channels', 2)) if has_audio else 0
+        audio_sample_rate = int(audio_stream.get('sample_rate', 48000)) if has_audio else 48000
+        audio_bit_depth = int(audio_stream.get('bits_per_sample', 16)) if has_audio else 16
+        if audio_bit_depth == 0:
+            audio_bit_depth = 16  # Default for compressed formats like AAC
+        
+        return {
+            'width': width,
+            'height': height,
+            'fps': fps,
+            'duration': duration,
+            'has_audio': has_audio,
+            'audio_channels': audio_channels,
+            'audio_sample_rate': audio_sample_rate,
+            'audio_bit_depth': audio_bit_depth,
+        }
+    except FileNotFoundError:
+        raise RuntimeError("ffprobe not found. Please install FFmpeg.")
+    except Exception as e:
+        raise RuntimeError(f"Failed to detect video info: {e}")
+
+
+# ─── Converter ────────────────────────────────────────────────────────────────
+
+class TwitchMarkersWithVideoConverter:
+    def __init__(self):
+        self.framerate = 30
+    
+    def _escape_xml(self, text):
+        """Escape special XML characters."""
+        return html.escape(str(text), quote=True)
+    
     def parse_timestamp(self, timestamp_str):
-        """Parse timestamp from format h:mm:ss or hh:mm:ss"""
+        """Parse timestamp from format h:mm:ss or hh:mm:ss."""
         parts = timestamp_str.strip().split(':')
         if len(parts) == 3:
             hours = int(parts[0])
@@ -29,538 +131,525 @@ class TwitchToXMLWithVideoConverter:
         raise ValueError(f"Invalid timestamp format: {timestamp_str}")
     
     def timedelta_to_frames(self, td):
-        """Convert timedelta to frame count"""
-        total_seconds = td.total_seconds()
-        return int(total_seconds * self.framerate)
+        """Convert timedelta to frame count."""
+        return int(td.total_seconds() * self.framerate)
     
-    def get_video_info(self, video_path):
-        """Get video duration, resolution and framerate using ffprobe"""
-        try:
-            # Get duration
-            result = subprocess.run(
-                ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
-                 '-of', 'default=noprint_wrappers=1:nokey=1', video_path],
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
-            duration_seconds = float(result.stdout.strip())
-            
-            # Get resolution
-            result = subprocess.run(
-                ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
-                 '-show_entries', 'stream=width,height',
-                 '-of', 'csv=p=0', video_path],
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
-            width, height = result.stdout.strip().split(',')
-            
-            # Get framerate
-            result = subprocess.run(
-                ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
-                 '-show_entries', 'stream=r_frame_rate',
-                 '-of', 'default=noprint_wrappers=1:nokey=1', video_path],
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
-            fps_str = result.stdout.strip()
-            if '/' in fps_str:
-                num, den = fps_str.split('/')
-                fps = float(num) / float(den)
-            else:
-                fps = float(fps_str)
-            
-            # Round to common framerates for cleaner output
-            if abs(fps - 23.976) < 0.1:
-                fps = 24.0
-            elif abs(fps - 29.97) < 0.1:
-                fps = 30.0
-            elif abs(fps - 59.94) < 0.1:
-                fps = 60.0
-            else:
-                fps = round(fps, 2)
-            
-            return {
-                'duration': duration_seconds,
-                'width': int(width),
-                'height': int(height),
-                'fps': fps
-            }
-        except Exception as e:
-            raise Exception(f"Could not get video info. Is ffprobe installed? Error: {str(e)}")
-    
-    def convert_csv_to_xml_with_video(self, csv_path, video_path, xml_path):
-        """Convert Twitch CSV markers to FCP XML with linked video"""
+    def read_markers(self, csv_path):
+        """Read markers from CSV file."""
         markers = []
-        
-        # Read CSV file
-        with open(csv_path, 'r', encoding='utf-8') as f:
+        with open(csv_path, 'r', encoding='utf-8-sig') as f:
             reader = csv.reader(f)
             for row in reader:
                 if len(row) >= 3 and row[0].strip():
-                    timestamp = row[0].strip()
-                    role = row[1].strip()
-                    username = row[2].strip()
-                    # Get description if present (4th column)
-                    description = row[3].strip() if len(row) > 3 else ""
-                    markers.append({
-                        'timestamp': timestamp,
-                        'role': role,
-                        'username': username,
-                        'description': description
-                    })
+                    try:
+                        td = self.parse_timestamp(row[0].strip())
+                        marker = {
+                            'timestamp': row[0].strip(),
+                            'timedelta': td,
+                            'role': row[1].strip(),
+                            'username': row[2].strip(),
+                            'description': row[3].strip() if len(row) > 3 else '',
+                        }
+                        markers.append(marker)
+                    except (ValueError, IndexError):
+                        continue
+        return markers
+    
+    def video_path_to_url(self, video_path):
+        """Convert file path to file://localhost/ URL (FCP7 XML standard)."""
+        from urllib.parse import quote
+        abs_path = os.path.abspath(video_path)
+        # URL-encode path but keep forward slashes and common safe chars
+        encoded_path = quote(abs_path, safe="/")
+        return "file://localhost" + encoded_path
+    
+    def generate_xml(self, csv_path, video_path, output_path):
+        """Generate FCP7 XML (xmeml) with video, audio, and markers."""
+        # Detect video properties
+        video_info = detect_video_info(video_path)
+        self.framerate = video_info['fps']
         
+        # Read markers
+        markers = self.read_markers(csv_path)
         if not markers:
             raise ValueError("No valid markers found in CSV file")
         
-        # Get video info
-        video_info = self.get_video_info(video_path)
-        
-        # Use video's actual framerate
-        self.framerate = video_info['fps']
-        
-        # Calculate durations
+        video_filename = os.path.basename(video_path)
+        video_url = self.video_path_to_url(video_path)
         video_duration_frames = int(video_info['duration'] * self.framerate)
         
-        # Create file URL for the video
-        video_path_abs = Path(video_path).resolve()
-        video_url = f"file://localhost{urllib.parse.quote(str(video_path_abs))}"
-        video_filename = video_path_abs.name
+        has_audio = video_info['has_audio']
+        audio_channels = video_info['audio_channels'] if has_audio else 2
+        audio_sample_rate = video_info['audio_sample_rate']
+        audio_bit_depth = video_info['audio_bit_depth']
         
-        # Build XML
-        xml_lines = ['<?xml version="1.0" encoding="UTF-8"?>']
-        xml_lines.append('<!DOCTYPE xmeml>')
-        xml_lines.append('<xmeml version="5">')
-        xml_lines.append('  <sequence>')
-        xml_lines.append('    <n>Twitch Stream with Markers</n>')
-        xml_lines.append(f'    <duration>{video_duration_frames}</duration>')
-        xml_lines.append('    <rate>')
-        xml_lines.append(f'      <timebase>{int(self.framerate)}</timebase>')
-        xml_lines.append('      <ntsc>FALSE</ntsc>')
-        xml_lines.append('    </rate>')
-        xml_lines.append('    <timecode>')
-        xml_lines.append('      <rate>')
-        xml_lines.append(f'        <timebase>{int(self.framerate)}</timebase>')
-        xml_lines.append('        <ntsc>FALSE</ntsc>')
-        xml_lines.append('      </rate>')
-        xml_lines.append('      <string>00:00:00:00</string>')
-        xml_lines.append('      <frame>0</frame>')
-        xml_lines.append('    </timecode>')
-        xml_lines.append('    <media>')
-        xml_lines.append('      <video>')
-        xml_lines.append('        <format>')
-        xml_lines.append('          <samplecharacteristics>')
-        xml_lines.append(f'            <width>{video_info["width"]}</width>')
-        xml_lines.append(f'            <height>{video_info["height"]}</height>')
-        xml_lines.append('          </samplecharacteristics>')
-        xml_lines.append('        </format>')
-        xml_lines.append('        <track>')
+        timeline_name = Path(csv_path).stem + "_with_video"
+        tb = int(self.framerate)
+        esc = self._escape_xml
         
-        # Add video clip to track
-        xml_lines.append('          <clipitem id="clipitem-1">')
-        xml_lines.append(f'            <name>{self._escape_xml(video_filename)}</name>')
-        xml_lines.append(f'            <duration>{video_duration_frames}</duration>')
-        xml_lines.append('            <rate>')
-        xml_lines.append(f'              <timebase>{int(self.framerate)}</timebase>')
-        xml_lines.append('              <ntsc>FALSE</ntsc>')
-        xml_lines.append('            </rate>')
-        xml_lines.append('            <start>0</start>')
-        xml_lines.append(f'            <end>{video_duration_frames}</end>')
-        xml_lines.append('            <in>0</in>')
-        xml_lines.append(f'            <out>{video_duration_frames}</out>')
+        L = []
+        a = L.append
         
-        # Add file reference
-        xml_lines.append('            <file id="file-1">')
-        xml_lines.append(f'              <name>{self._escape_xml(video_filename)}</name>')
-        xml_lines.append(f'              <pathurl>{self._escape_xml(video_url)}</pathurl>')
-        xml_lines.append('              <rate>')
-        xml_lines.append(f'                <timebase>{int(self.framerate)}</timebase>')
-        xml_lines.append('                <ntsc>FALSE</ntsc>')
-        xml_lines.append('              </rate>')
-        xml_lines.append(f'              <duration>{video_duration_frames}</duration>')
-        xml_lines.append('              <media>')
-        xml_lines.append('                <video>')
-        xml_lines.append('                  <samplecharacteristics>')
-        xml_lines.append(f'                    <width>{video_info["width"]}</width>')
-        xml_lines.append(f'                    <height>{video_info["height"]}</height>')
-        xml_lines.append('                  </samplecharacteristics>')
-        xml_lines.append('                </video>')
-        xml_lines.append('              </media>')
-        xml_lines.append('            </file>')
-        xml_lines.append('          </clipitem>')
-        xml_lines.append('        </track>')
-        xml_lines.append('      </video>')
-        xml_lines.append('    </media>')
+        a('<?xml version="1.0" encoding="UTF-8"?>')
+        a('<!DOCTYPE xmeml>')
+        a('<xmeml version="4">')
+        a('  <sequence>')
+        a('    <name>' + esc(timeline_name) + '</name>')
+        a('    <duration>' + str(video_duration_frames) + '</duration>')
+        a('    <rate>')
+        a('      <timebase>' + str(tb) + '</timebase>')
+        a('      <ntsc>FALSE</ntsc>')
+        a('    </rate>')
+        a('    <timecode>')
+        a('      <rate>')
+        a('        <timebase>' + str(tb) + '</timebase>')
+        a('        <ntsc>FALSE</ntsc>')
+        a('      </rate>')
+        a('      <string>00:00:00:00</string>')
+        a('      <frame>0</frame>')
+        a('      <displayformat>NDF</displayformat>')
+        a('    </timecode>')
         
-        # Add markers at SEQUENCE level (this makes them appear in DaVinci Resolve!)
+        # Sequence-level markers
         for marker in markers:
-            td = self.parse_timestamp(marker['timestamp'])
-            frame_number = self.timedelta_to_frames(td)
-            
-            # Build marker name with description if present
+            frame_pos = self.timedelta_to_frames(marker['timedelta'])
             if marker['description']:
-                marker_name = f"{marker['description']} - by {marker['username']} [{marker['role']}]"
-                marker_comment = f"{marker['description']} (Twitch marker by {marker['username']})"
+                mname = marker['description'] + " - by " + marker['username'] + " [" + marker['role'] + "]"
+                mcomment = marker['description'] + " (Twitch marker by " + marker['username'] + ")"
             else:
-                marker_name = f"by {marker['username']} [{marker['role']}]"
-                marker_comment = f"Twitch marker by {marker['username']}"
-            
-            xml_lines.append('    <marker>')
-            xml_lines.append(f'      <n>{self._escape_xml(marker_name)}</n>')
-            xml_lines.append(f'      <comment>{self._escape_xml(marker_comment)}</comment>')
-            xml_lines.append(f'      <in>{frame_number}</in>')
-            xml_lines.append(f'      <out>{frame_number + 1}</out>')
-            xml_lines.append('    </marker>')
+                mname = "by " + marker['username'] + " [" + marker['role'] + "]"
+                mcomment = "Twitch marker by " + marker['username']
+            a('    <marker>')
+            a('      <name>' + esc(mname) + '</name>')
+            a('      <comment>' + esc(mcomment) + '</comment>')
+            a('      <in>' + str(frame_pos) + '</in>')
+            a('      <out>' + str(frame_pos + 1) + '</out>')
+            a('    </marker>')
         
-        xml_lines.append('  </sequence>')
-        xml_lines.append('</xmeml>')
+        # Media section
+        a('    <media>')
         
-        # Write to file
-        with open(xml_path, 'w', encoding='utf-8') as f:
-            f.write('\n'.join(xml_lines))
+        # VIDEO TRACK
+        a('      <video>')
+        a('        <format>')
+        a('          <samplecharacteristics>')
+        a('            <rate>')
+        a('              <timebase>' + str(tb) + '</timebase>')
+        a('              <ntsc>FALSE</ntsc>')
+        a('            </rate>')
+        a('            <width>' + str(video_info["width"]) + '</width>')
+        a('            <height>' + str(video_info["height"]) + '</height>')
+        a('            <anamorphic>FALSE</anamorphic>')
+        a('            <pixelaspectratio>square</pixelaspectratio>')
+        a('            <fielddominance>none</fielddominance>')
+        a('          </samplecharacteristics>')
+        a('        </format>')
+        a('        <track>')
+        
+        # Video clipitem
+        a('          <clipitem id="clipitem-1" frameBlend="FALSE">')
+        a('            <name>' + esc(video_filename) + '</name>')
+        a('            <duration>' + str(video_duration_frames) + '</duration>')
+        a('            <rate>')
+        a('              <timebase>' + str(tb) + '</timebase>')
+        a('              <ntsc>FALSE</ntsc>')
+        a('            </rate>')
+        a('            <start>0</start>')
+        a('            <end>' + str(video_duration_frames) + '</end>')
+        a('            <in>0</in>')
+        a('            <out>' + str(video_duration_frames) + '</out>')
+        
+        # File reference
+        a('            <file id="file-1">')
+        a('              <name>' + esc(video_filename) + '</name>')
+        a('              <pathurl>' + esc(video_url) + '</pathurl>')
+        a('              <rate>')
+        a('                <timebase>' + str(tb) + '</timebase>')
+        a('                <ntsc>FALSE</ntsc>')
+        a('              </rate>')
+        a('              <duration>' + str(video_duration_frames) + '</duration>')
+        a('              <timecode>')
+        a('                <rate>')
+        a('                  <timebase>' + str(tb) + '</timebase>')
+        a('                  <ntsc>FALSE</ntsc>')
+        a('                </rate>')
+        a('                <string>00:00:00:00</string>')
+        a('                <frame>0</frame>')
+        a('                <displayformat>NDF</displayformat>')
+        a('              </timecode>')
+        a('              <media>')
+        a('                <video>')
+        a('                  <samplecharacteristics>')
+        a('                    <rate>')
+        a('                      <timebase>' + str(tb) + '</timebase>')
+        a('                      <ntsc>FALSE</ntsc>')
+        a('                    </rate>')
+        a('                    <width>' + str(video_info["width"]) + '</width>')
+        a('                    <height>' + str(video_info["height"]) + '</height>')
+        a('                    <anamorphic>FALSE</anamorphic>')
+        a('                    <pixelaspectratio>square</pixelaspectratio>')
+        a('                    <fielddominance>none</fielddominance>')
+        a('                  </samplecharacteristics>')
+        a('                </video>')
+        if has_audio:
+            a('                <audio>')
+            a('                  <samplecharacteristics>')
+            a('                    <depth>' + str(audio_bit_depth) + '</depth>')
+            a('                    <samplerate>' + str(audio_sample_rate) + '</samplerate>')
+            a('                  </samplecharacteristics>')
+            a('                  <channelcount>' + str(audio_channels) + '</channelcount>')
+            a('                  <layout>stereo</layout>')
+            a('                </audio>')
+        a('              </media>')
+        a('            </file>')
+        
+        # Source track
+        a('            <sourcetrack>')
+        a('              <mediatype>video</mediatype>')
+        a('              <trackindex>1</trackindex>')
+        a('            </sourcetrack>')
+        
+        # Links
+        if has_audio:
+            a('            <link>')
+            a('              <linkclipref>clipitem-1</linkclipref>')
+            a('              <mediatype>video</mediatype>')
+            a('              <trackindex>1</trackindex>')
+            a('              <clipindex>1</clipindex>')
+            a('            </link>')
+            a('            <link>')
+            a('              <linkclipref>clipitem-2</linkclipref>')
+            a('              <mediatype>audio</mediatype>')
+            a('              <trackindex>1</trackindex>')
+            a('              <clipindex>1</clipindex>')
+            a('            </link>')
+        
+        a('          </clipitem>')
+        a('        </track>')
+        a('      </video>')
+        
+        # AUDIO (single stereo track, same file)
+        if has_audio:
+            a('      <audio>')
+            a('        <numOutputChannels>2</numOutputChannels>')
+            a('        <format>')
+            a('          <samplecharacteristics>')
+            a('            <depth>' + str(audio_bit_depth) + '</depth>')
+            a('            <samplerate>' + str(audio_sample_rate) + '</samplerate>')
+            a('          </samplecharacteristics>')
+            a('        </format>')
+            a('        <track>')
+            a('          <clipitem id="clipitem-2" frameBlend="FALSE">')
+            a('            <name>' + esc(video_filename) + '</name>')
+            a('            <duration>' + str(video_duration_frames) + '</duration>')
+            a('            <rate>')
+            a('              <timebase>' + str(tb) + '</timebase>')
+            a('              <ntsc>FALSE</ntsc>')
+            a('            </rate>')
+            a('            <start>0</start>')
+            a('            <end>' + str(video_duration_frames) + '</end>')
+            a('            <in>0</in>')
+            a('            <out>' + str(video_duration_frames) + '</out>')
+            a('            <file id="file-1"/>')
+            a('            <sourcetrack>')
+            a('              <mediatype>audio</mediatype>')
+            a('              <trackindex>1</trackindex>')
+            a('            </sourcetrack>')
+            a('            <link>')
+            a('              <linkclipref>clipitem-1</linkclipref>')
+            a('              <mediatype>video</mediatype>')
+            a('              <trackindex>1</trackindex>')
+            a('              <clipindex>1</clipindex>')
+            a('            </link>')
+            a('            <link>')
+            a('              <linkclipref>clipitem-2</linkclipref>')
+            a('              <mediatype>audio</mediatype>')
+            a('              <trackindex>1</trackindex>')
+            a('              <clipindex>1</clipindex>')
+            a('            </link>')
+            a('          </clipitem>')
+            a('        </track>')
+            a('      </audio>')
+        
+        a('    </media>')
+        a('  </sequence>')
+        a('</xmeml>')
+        
+        # Write XML
+        xml_content = "\n".join(L)
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(xml_content)
         
         return len(markers), video_info
+
+        return len(markers), video_info
+
+
+# ─── Modern GUI Components ────────────────────────────────────────────────────
+
+class StyledButton(tk.Button):
+    """A styled button compatible with all platforms."""
+    def __init__(self, parent, text, command=None, bg_color="#4A90D9",
+                 fg_color="#333333", hover_color="#3A7BC8",
+                 font=("Segoe UI", 11, "bold"), **kwargs):
+        # Remove unsupported kwargs
+        kwargs.pop('width', None)
+        kwargs.pop('height', None)
+        kwargs.pop('corner_radius', None)
+        super().__init__(parent, text=text, command=command,
+                        font=font, bg=bg_color, fg=fg_color,
+                        activebackground=hover_color, activeforeground=fg_color,
+                        relief='flat', cursor='hand2', padx=12, pady=4, **kwargs)
+        self.bg_color = bg_color
+        self.hover_color = hover_color
+        self.bind("<Enter>", lambda e: self.config(bg=self.hover_color))
+        self.bind("<Leave>", lambda e: self.config(bg=self.bg_color))
     
-    def _escape_xml(self, text):
-        """Escape special XML characters"""
-        text = text.replace('&', '&amp;')
-        text = text.replace('<', '&lt;')
-        text = text.replace('>', '&gt;')
-        text = text.replace('"', '&quot;')
-        text = text.replace("'", '&apos;')
-        return text
+    def set_enabled(self, enabled):
+        if enabled:
+            self.config(state='normal', bg=self.bg_color)
+        else:
+            self.config(state='disabled', bg="#888888")
 
 
-class RoundedButton(tk.Canvas):
-    """Modern button with rounded corners"""
-    def __init__(self, parent, text, command, bg='#6366f1', hover_bg='#4f46e5', 
-                 fg='white', width=280, height=50, corner_radius=12, **kwargs):
-        super().__init__(parent, width=width, height=height, 
-                        bg=parent['bg'], highlightthickness=0, **kwargs)
-        
-        self.command = command
-        self.bg_color = bg
-        self.hover_color = hover_bg
-        self.fg_color = fg
-        self.text = text
-        self.width = width
-        self.height = height
-        self.radius = corner_radius
-        
-        # Create rounded rectangle
-        self.rect = self._create_rounded_rect(4, 4, width-4, height-4, corner_radius, fill=bg)
-        self.text_id = self.create_text(width//2, height//2, 
-                                        text=text, fill=fg, 
-                                        font=('SF Pro Display', 14, 'bold') if self._font_exists('SF Pro Display') else ('Arial', 14, 'bold'),
-                                        tags='button')
-        
-        # Bind events
-        self.tag_bind(self.rect, '<Enter>', self.on_enter)
-        self.tag_bind(self.text_id, '<Enter>', self.on_enter)
-        self.tag_bind(self.rect, '<Leave>', self.on_leave)
-        self.tag_bind(self.text_id, '<Leave>', self.on_leave)
-        self.tag_bind(self.rect, '<Button-1>', self.on_click)
-        self.tag_bind(self.text_id, '<Button-1>', self.on_click)
-        self.bind('<Enter>', self.on_enter)
-        self.bind('<Leave>', self.on_leave)
-        self.config(cursor='hand2')
-        
-    def _font_exists(self, font_name):
-        import tkinter.font as tkfont
-        return font_name in tkfont.families()
-    
-    def _create_rounded_rect(self, x1, y1, x2, y2, radius, **kwargs):
-        points = [
-            x1+radius, y1,
-            x2-radius, y1,
-            x2, y1,
-            x2, y1+radius,
-            x2, y2-radius,
-            x2, y2,
-            x2-radius, y2,
-            x1+radius, y2,
-            x1, y2,
-            x1, y2-radius,
-            x1, y1+radius,
-            x1, y1
-        ]
-        return self.create_polygon(points, smooth=True, **kwargs)
-    
-    def on_enter(self, event):
-        self.itemconfig(self.rect, fill=self.hover_color)
-        
-    def on_leave(self, event):
-        self.itemconfig(self.rect, fill=self.bg_color)
-        
-    def on_click(self, event):
-        self.command()
+class RoundedCard(tk.Frame):
+    """A frame styled as a card with rounded appearance."""
+    def __init__(self, parent, bg="#2D2D2D", **kwargs):
+        super().__init__(parent, bg=bg, padx=15, pady=12, **kwargs)
 
 
-class RoundedCard(tk.Canvas):
-    """Rounded corner card container"""
-    def __init__(self, parent, width, height, corner_radius=16, bg='#252540', **kwargs):
-        super().__init__(parent, width=width, height=height,
-                        bg=parent['bg'], highlightthickness=0, **kwargs)
-        
-        self.bg_color = bg
-        self.width = width
-        self.height = height
-        
-        # Create rounded rectangle background
-        self._create_rounded_rect(0, 0, width, height, corner_radius, fill=bg, outline='')
-        
-        # Create frame for content
-        self.content_frame = tk.Frame(self, bg=bg)
-        self.create_window(width//2, height//2, window=self.content_frame, width=width-40, height=height-40)
-        
-    def _create_rounded_rect(self, x1, y1, x2, y2, radius, **kwargs):
-        points = [
-            x1+radius, y1,
-            x2-radius, y1,
-            x2, y1,
-            x2, y1+radius,
-            x2, y2-radius,
-            x2, y2,
-            x2-radius, y2,
-            x1+radius, y2,
-            x1, y2,
-            x1, y2-radius,
-            x1, y1+radius,
-            x1, y1
-        ]
-        return self.create_polygon(points, smooth=True, **kwargs)
+# ─── Main GUI ─────────────────────────────────────────────────────────────────
 
-
-class ConverterWithVideoGUI:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Twitch to Resolve - With Video Link")
-        self.root.geometry("680x680")
+class TwitchMarkersWithVideoGUI:
+    def __init__(self):
+        self.root = tk.Tk()
+        self.root.title("Twitch Markers → DaVinci Resolve (With Video)")
+        self.root.geometry("600x580")
+        self.root.configure(bg="#1E1E1E")
         self.root.resizable(False, False)
         
         self.csv_path = None
         self.video_path = None
+        self.converter = TwitchMarkersWithVideoConverter()
         
-        # Modern color scheme
-        self.bg_primary = '#0f0f1e'
-        self.bg_card = '#252540'
-        self.bg_secondary = '#1a1a2e'
-        self.accent_primary = '#6366f1'
-        self.accent_hover = '#4f46e5'
-        self.accent_green = '#10b981'
-        self.text_primary = '#ffffff'
-        self.text_secondary = '#a0a0b0'
-        self.text_muted = '#6b6b80'
+        self._build_ui()
+    
+    def _build_ui(self):
+        bg = "#1E1E1E"
+        fg = "#E0E0E0"
+        accent = "#4A90D9"
         
-        self.root.configure(bg=self.bg_primary)
-        self.create_widgets()
+        # Title
+        title_frame = tk.Frame(self.root, bg=bg)
+        title_frame.pack(pady=(20, 5))
+        tk.Label(title_frame, text="🎬 Twitch Markers → DaVinci Resolve",
+                font=("Segoe UI", 16, "bold"), bg=bg, fg=fg).pack()
+        tk.Label(title_frame, text="With Video + Audio Import",
+                font=("Segoe UI", 10), bg=bg, fg="#888888").pack()
         
-    def _font_exists(self, font_name):
-        import tkinter.font as tkfont
-        return font_name in tkfont.families()
+        # CSV file card
+        csv_card = RoundedCard(self.root, bg="#2D2D2D")
+        csv_card.pack(fill='x', padx=25, pady=(15, 5))
         
-    def create_widgets(self):
-        # Main container
-        main_container = tk.Frame(self.root, bg=self.bg_primary)
-        main_container.pack(fill='both', expand=True, padx=30, pady=30)
+        tk.Label(csv_card, text="📋 Markers CSV File", font=("Segoe UI", 11, "bold"),
+                bg="#2D2D2D", fg=fg).pack(anchor='w')
         
-        # Header
-        tk.Label(
-            main_container,
-            text="🎬",
-            font=('Arial', 52),
-            bg=self.bg_primary,
-            fg=self.text_primary
-        ).pack(pady=(0, 8))
+        csv_row = tk.Frame(csv_card, bg="#2D2D2D")
+        csv_row.pack(fill='x', pady=(5, 0))
         
-        tk.Label(
-            main_container,
-            text="Twitch to Resolve",
-            font=('SF Pro Display', 24, 'bold') if self._font_exists('SF Pro Display') else ('Arial', 24, 'bold'),
-            bg=self.bg_primary,
-            fg=self.text_primary
-        ).pack(pady=(0, 3))
+        self.csv_label = tk.Label(csv_row, text="No file selected",
+                                 font=("Segoe UI", 9), bg="#2D2D2D", fg="#888888",
+                                 anchor='w')
+        self.csv_label.pack(side='left', fill='x', expand=True)
         
-        tk.Label(
-            main_container,
-            text="Timeline with Video & Markers",
-            font=('SF Pro Display', 13) if self._font_exists('SF Pro Display') else ('Arial', 13),
-            bg=self.bg_primary,
-            fg=self.accent_green
-        ).pack(pady=(0, 20))
+        StyledButton(csv_row, "Browse", command=self._choose_csv,
+                      width=90, height=30, corner_radius=8,
+                      font=("Segoe UI", 9, "bold")).pack(side='right')
         
-        # Card
-        card = RoundedCard(main_container, width=620, height=450, corner_radius=20, bg=self.bg_card)
-        card.pack()
+        # Video file card
+        video_card = RoundedCard(self.root, bg="#2D2D2D")
+        video_card.pack(fill='x', padx=25, pady=5)
         
-        card_content = card.content_frame
-        card_content.configure(bg=self.bg_card)
+        tk.Label(video_card, text="🎥 Video File", font=("Segoe UI", 11, "bold"),
+                bg="#2D2D2D", fg=fg).pack(anchor='w')
         
-        # Instructions
-        tk.Label(
-            card_content,
-            text="Select Your Files",
-            font=('SF Pro Display', 14, 'bold') if self._font_exists('SF Pro Display') else ('Arial', 14, 'bold'),
-            bg=self.bg_card,
-            fg=self.text_primary
-        ).pack(pady=(15, 15))
+        video_row = tk.Frame(video_card, bg="#2D2D2D")
+        video_row.pack(fill='x', pady=(5, 0))
         
-        # CSV File button
-        csv_btn_frame = tk.Frame(card_content, bg=self.bg_card)
-        csv_btn_frame.pack(pady=(0, 10))
+        self.video_label = tk.Label(video_row, text="No file selected",
+                                   font=("Segoe UI", 9), bg="#2D2D2D", fg="#888888",
+                                   anchor='w')
+        self.video_label.pack(side='left', fill='x', expand=True)
         
-        self.csv_btn = RoundedButton(
-            csv_btn_frame,
-            text="1. Choose CSV Markers File",
-            command=self.select_csv,
-            bg=self.bg_secondary,
-            hover_bg='#2a2a40',
-            fg=self.text_primary,
-            width=320,
-            height=48,
-            corner_radius=10
-        )
-        self.csv_btn.pack()
+        StyledButton(video_row, "Browse", command=self._choose_video,
+                      width=90, height=30, corner_radius=8,
+                      font=("Segoe UI", 9, "bold")).pack(side='right')
         
-        self.csv_label = tk.Label(
-            card_content,
-            text="No file selected",
-            font=('SF Pro Display', 10) if self._font_exists('SF Pro Display') else ('Arial', 10),
-            bg=self.bg_card,
-            fg=self.text_muted
-        )
-        self.csv_label.pack(pady=(5, 15))
+        # Info card (shows detected properties)
+        self.info_card = RoundedCard(self.root, bg="#2D2D2D")
+        self.info_card.pack(fill='x', padx=25, pady=5)
         
-        # Video File button
-        video_btn_frame = tk.Frame(card_content, bg=self.bg_card)
-        video_btn_frame.pack(pady=(0, 10))
+        tk.Label(self.info_card, text="ℹ️ Video Properties", 
+                font=("Segoe UI", 11, "bold"), bg="#2D2D2D", fg=fg).pack(anchor='w')
         
-        self.video_btn = RoundedButton(
-            video_btn_frame,
-            text="2. Choose Video File",
-            command=self.select_video,
-            bg=self.bg_secondary,
-            hover_bg='#2a2a40',
-            fg=self.text_primary,
-            width=320,
-            height=48,
-            corner_radius=10
-        )
-        self.video_btn.pack()
-        
-        self.video_label = tk.Label(
-            card_content,
-            text="No file selected",
-            font=('SF Pro Display', 10) if self._font_exists('SF Pro Display') else ('Arial', 10),
-            bg=self.bg_card,
-            fg=self.text_muted
-        )
-        self.video_label.pack(pady=(5, 20))
-        
-        # Divider
-        tk.Frame(card_content, bg='#3a3a50', height=1).pack(fill='x', pady=15)
+        self.info_label = tk.Label(self.info_card, text="Select a video file to detect properties",
+                                  font=("Segoe UI", 9), bg="#2D2D2D", fg="#888888",
+                                  anchor='w', justify='left')
+        self.info_label.pack(anchor='w', pady=(5, 0))
         
         # Convert button
-        convert_btn = RoundedButton(
-            card_content,
-            text="3. Create XML with Video",
-            command=self.convert,
-            bg=self.accent_primary,
-            hover_bg=self.accent_hover,
-            fg='white',
-            width=320,
-            height=55,
-            corner_radius=12
+        btn_frame = tk.Frame(self.root, bg=bg)
+        btn_frame.pack(pady=15)
+        
+        self.convert_btn = StyledButton(
+            btn_frame, "🚀 Create XML with Video + Audio",
+            command=self._convert,
+            bg_color="#2ECC71", hover_color="#27AE60",
+            width=300, height=45, corner_radius=12,
+            font=("Segoe UI", 12, "bold")
         )
-        convert_btn.pack(pady=(10, 15))
+        self.convert_btn.pack()
         
-        # Footer
-        footer_frame = tk.Frame(main_container, bg=self.bg_primary)
-        footer_frame.pack(pady=(20, 0))
+        # Status
+        self.status_label = tk.Label(self.root, text="", font=("Segoe UI", 9),
+                                    bg=bg, fg="#888888", wraplength=550)
+        self.status_label.pack(pady=(5, 0))
         
-        for text in [
-            "✓ Video clip placed on timeline",
-            "✓ Markers positioned on clip",
-            "✓ Ready to edit immediately"
-        ]:
-            tk.Label(
-                footer_frame,
-                text=text,
-                font=('SF Pro Display', 10) if self._font_exists('SF Pro Display') else ('Arial', 10),
-                bg=self.bg_primary,
-                fg=self.text_muted
-            ).pack(pady=2)
+        # Help text
+        help_card = RoundedCard(self.root, bg="#2D2D2D")
+        help_card.pack(fill='x', padx=25, pady=(10, 15))
+        
+        help_text = (
+            "CSV format: timestamp,role,username,description(optional)\n"
+            "Example: 4:08:26,Broadcaster,StreamerJoe,Epic moment!\n\n"
+            "The XML will contain your video with its audio on the timeline,\n"
+            "plus all markers positioned at the correct timestamps."
+        )
+        tk.Label(help_card, text=help_text, font=("Segoe UI", 8),
+                bg="#2D2D2D", fg="#666666", justify='left').pack(anchor='w')
     
-    def select_csv(self):
-        csv_path = filedialog.askopenfilename(
-            title="Select Twitch CSV Marker File",
+    def _choose_csv(self):
+        path = filedialog.askopenfilename(
+            title="Choose Twitch Markers CSV",
             filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
         )
-        
-        if csv_path:
-            self.csv_path = csv_path
-            filename = Path(csv_path).name
-            self.csv_label.configure(text=f"✓ {filename}", fg=self.accent_green)
+        if path:
+            self.csv_path = path
+            self.csv_label.config(text=os.path.basename(path), fg="#E0E0E0")
+            self.status_label.config(text="")
     
-    def select_video(self):
-        video_path = filedialog.askopenfilename(
-            title="Select Video File",
+    def _choose_video(self):
+        path = filedialog.askopenfilename(
+            title="Choose Video File",
             filetypes=[
-                ("Video files", "*.mp4 *.mov *.avi *.mkv *.flv *.webm *.mts *.m2ts"),
+                ("Video files", "*.mp4 *.mkv *.mov *.avi *.webm *.ts *.flv *.m4v"),
                 ("All files", "*.*")
             ]
         )
-        
-        if video_path:
-            self.video_path = video_path
-            filename = Path(video_path).name
-            self.video_label.configure(text=f"✓ {filename}", fg=self.accent_green)
+        if path:
+            self.video_path = path
+            self.video_label.config(text=os.path.basename(path), fg="#E0E0E0")
+            self.status_label.config(text="Detecting video properties...")
+            self.root.update()
+            
+            try:
+                info = detect_video_info(path)
+                audio_str = "Yes" if info['has_audio'] else "No"
+                if info['has_audio']:
+                    audio_str += f" ({info['audio_channels']}ch, {info['audio_sample_rate']}Hz, {info['audio_bit_depth']}bit)"
+                
+                info_text = (
+                    f"Resolution: {info['width']}x{info['height']}  |  "
+                    f"FPS: {info['fps']}  |  "
+                    f"Duration: {timedelta(seconds=int(info['duration']))}\n"
+                    f"Audio: {audio_str}"
+                )
+                self.info_label.config(text=info_text, fg="#E0E0E0")
+                self.status_label.config(text="✅ Video detected successfully", fg="#2ECC71")
+            except Exception as e:
+                self.info_label.config(text=f"Error: {e}", fg="#E74C3C")
+                self.status_label.config(text="", fg="#888888")
     
-    def convert(self):
+    def _convert(self):
         if not self.csv_path:
-            messagebox.showerror("Missing File", "Please select a CSV markers file first.")
+            messagebox.showwarning("Missing File", "Please select a CSV markers file.")
+            return
+        if not self.video_path:
+            messagebox.showwarning("Missing File", "Please select a video file.")
             return
         
-        if not self.video_path:
-            messagebox.showerror("Missing File", "Please select a video file first.")
-            return
+        # Generate output path next to CSV
+        csv_dir = os.path.dirname(self.csv_path)
+        csv_stem = Path(self.csv_path).stem
+        output_path = os.path.join(csv_dir, f"{csv_stem}_with_video.xml")
+        
+        self.status_label.config(text="Generating XML...", fg="#F39C12")
+        self.root.update()
         
         try:
-            csv_file = Path(self.csv_path)
-            xml_path = csv_file.with_suffix('.xml')
+            num_markers, video_info = self.converter.generate_xml(
+                self.csv_path, self.video_path, output_path
+            )
             
-            converter = TwitchToXMLWithVideoConverter()
-            marker_count, video_info = converter.convert_csv_to_xml_with_video(
-                self.csv_path, 
-                self.video_path, 
-                xml_path
+            audio_status = "with audio" if video_info['has_audio'] else "without audio"
+            self.status_label.config(
+                text=f"✅ Done! {num_markers} markers + video ({audio_status}) → {os.path.basename(output_path)}",
+                fg="#2ECC71"
             )
             
             messagebox.showinfo(
-                "Conversion Successful",
-                f"✓ Successfully created timeline!\n\n"
-                f"Markers: {marker_count}\n"
-                f"Video: {video_info['width']}x{video_info['height']} @ {video_info['fps']:.2f}fps\n"
-                f"Duration: {video_info['duration']:.1f}s\n\n"
-                f"File saved to:\n{xml_path}\n\n"
-                f"Import into DaVinci Resolve:\n"
+                "Success!",
+                f"XML created successfully!\n\n"
+                f"📄 {output_path}\n\n"
+                f"Markers: {num_markers}\n"
+                f"Video: {video_info['width']}x{video_info['height']} @ {video_info['fps']}fps\n"
+                f"Audio: {'Yes (' + str(video_info['audio_channels']) + ' channels)' if video_info['has_audio'] else 'No audio detected'}\n\n"
+                f"Import in DaVinci Resolve:\n"
                 f"File → Import → Timeline → Import AAF, EDL, XML...\n\n"
-                f"Your video will already be on the timeline with markers!\n"
-                f"Ready to edit immediately."
+                f"The video with its audio and all markers will be on the timeline!"
             )
-            
         except Exception as e:
-            messagebox.showerror("Conversion Error", f"Error:\n\n{str(e)}")
+            self.status_label.config(text=f"❌ Error: {e}", fg="#E74C3C")
+            messagebox.showerror("Error", str(e))
+    
+    def run(self):
+        self.root.mainloop()
 
 
-def main():
-    root = tk.Tk()
-    app = ConverterWithVideoGUI(root)
-    root.mainloop()
+# ─── CLI mode ─────────────────────────────────────────────────────────────────
+
+def cli_mode():
+    if len(sys.argv) < 3:
+        print("Usage: python3 twitch_markers_with_video_gui.py <markers.csv> <video_file>")
+        print("       python3 twitch_markers_with_video_gui.py   (launches GUI)")
+        sys.exit(1)
+    
+    csv_path = sys.argv[1]
+    video_path = sys.argv[2]
+    output_path = sys.argv[3] if len(sys.argv) > 3 else None
+    
+    if not os.path.exists(csv_path):
+        print(f"Error: CSV file not found: {csv_path}")
+        sys.exit(1)
+    if not os.path.exists(video_path):
+        print(f"Error: Video file not found: {video_path}")
+        sys.exit(1)
+    
+    if not output_path:
+        output_path = str(Path(csv_path).with_suffix('')) + "_with_video.xml"
+    
+    converter = TwitchMarkersWithVideoConverter()
+    num_markers, video_info = converter.generate_xml(csv_path, video_path, output_path)
+    
+    print(f"✅ Created {output_path}")
+    print(f"   {num_markers} markers | {video_info['width']}x{video_info['height']} @ {video_info['fps']}fps")
+    print(f"   Audio: {'Yes (' + str(video_info['audio_channels']) + 'ch)' if video_info['has_audio'] else 'No'}")
+    print(f"\nImport in DaVinci Resolve: File → Import → Timeline → Import AAF, EDL, XML...")
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) > 1:
+        cli_mode()
+    else:
+        app = TwitchMarkersWithVideoGUI()
+        app.run()
