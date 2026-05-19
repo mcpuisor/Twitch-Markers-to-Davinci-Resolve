@@ -120,6 +120,13 @@ class TwitchMarkersWithVideoConverter:
         """Escape special XML characters."""
         return html.escape(str(text), quote=True)
     
+    def _get_marker_color(self, marker_type):
+        """Get color code for marker type (markers=Blue, clips=Orange)."""
+        # FCP XML color names: Red, Green, Blue, Yellow, Cyan, Magenta, etc.
+        if marker_type == "clip":
+            return "Orange"
+        return "Blue"  # Default for regular markers
+    
     def parse_timestamp(self, timestamp_str):
         """Parse timestamp from format h:mm:ss or hh:mm:ss."""
         parts = timestamp_str.strip().split(':')
@@ -134,8 +141,8 @@ class TwitchMarkersWithVideoConverter:
         """Convert timedelta to frame count."""
         return int(td.total_seconds() * self.framerate)
     
-    def read_markers(self, csv_path):
-        """Read markers from CSV file."""
+    def read_markers(self, csv_path, marker_type="marker"):
+        """Read markers from CSV file. marker_type can be 'marker' or 'clip'."""
         markers = []
         with open(csv_path, 'r', encoding='utf-8-sig') as f:
             reader = csv.reader(f)
@@ -149,11 +156,29 @@ class TwitchMarkersWithVideoConverter:
                             'role': row[1].strip(),
                             'username': row[2].strip(),
                             'description': row[3].strip() if len(row) > 3 else '',
+                            'type': marker_type,
                         }
                         markers.append(marker)
                     except (ValueError, IndexError):
                         continue
         return markers
+    
+    def read_markers_and_clips(self, markers_csv_path, clips_csv_path=None):
+        """Read and merge markers and clips from CSV files."""
+        all_markers = []
+        
+        # Read markers
+        if markers_csv_path:
+            all_markers.extend(self.read_markers(markers_csv_path, marker_type="marker"))
+        
+        # Read clips
+        if clips_csv_path:
+            all_markers.extend(self.read_markers(clips_csv_path, marker_type="clip"))
+        
+        # Sort by timestamp
+        all_markers.sort(key=lambda m: m['timedelta'])
+        
+        return all_markers
     
     def video_path_to_url(self, video_path):
         """Convert file path to file://localhost/ URL (FCP7 XML standard)."""
@@ -163,16 +188,16 @@ class TwitchMarkersWithVideoConverter:
         encoded_path = quote(abs_path, safe="/")
         return "file://localhost" + encoded_path
     
-    def generate_xml(self, csv_path, video_path, output_path):
-        """Generate FCP7 XML (xmeml) with video, audio, and markers."""
+    def generate_xml(self, csv_path, video_path, output_path, clips_csv_path=None):
+        """Generate FCP7 XML (xmeml) with video, audio, markers and clips."""
         # Detect video properties
         video_info = detect_video_info(video_path)
         self.framerate = video_info['fps']
         
-        # Read markers
-        markers = self.read_markers(csv_path)
+        # Read markers and clips
+        markers = self.read_markers_and_clips(csv_path, clips_csv_path)
         if not markers:
-            raise ValueError("No valid markers found in CSV file")
+            raise ValueError("No valid markers/clips found in CSV files")
         
         video_filename = os.path.basename(video_path)
         video_url = self.video_path_to_url(video_path)
@@ -213,17 +238,20 @@ class TwitchMarkersWithVideoConverter:
         # Sequence-level markers
         for marker in markers:
             frame_pos = self.timedelta_to_frames(marker['timedelta'])
+            marker_type_label = "[CLIP]" if marker['type'] == 'clip' else ""
             if marker['description']:
-                mname = marker['description'] + " - by " + marker['username'] + " [" + marker['role'] + "]"
+                mname = marker['description'] + " - by " + marker['username'] + " [" + marker['role'] + "]" + (" " + marker_type_label if marker_type_label else "")
                 mcomment = marker['description'] + " (Twitch marker by " + marker['username'] + ")"
             else:
-                mname = "by " + marker['username'] + " [" + marker['role'] + "]"
+                mname = "by " + marker['username'] + " [" + marker['role'] + "]" + (" " + marker_type_label if marker_type_label else "")
                 mcomment = "Twitch marker by " + marker['username']
+            color = self._get_marker_color(marker['type'])
             a('    <marker>')
             a('      <name>' + esc(mname) + '</name>')
             a('      <comment>' + esc(mcomment) + '</comment>')
             a('      <in>' + str(frame_pos) + '</in>')
             a('      <out>' + str(frame_pos + 1) + '</out>')
+            a('      <color>' + color + '</color>')
             a('    </marker>')
         
         # Media section
@@ -424,11 +452,12 @@ class TwitchMarkersWithVideoGUI:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("Twitch Markers → DaVinci Resolve (With Video)")
-        self.root.geometry("600x580")
+        self.root.geometry("600x680")
         self.root.configure(bg="#1E1E1E")
         self.root.resizable(False, False)
         
-        self.csv_path = None
+        self.markers_csv_path = None
+        self.clips_csv_path = None
         self.video_path = None
         self.converter = TwitchMarkersWithVideoConverter()
         
@@ -457,12 +486,31 @@ class TwitchMarkersWithVideoGUI:
         csv_row = tk.Frame(csv_card, bg="#2D2D2D")
         csv_row.pack(fill='x', pady=(5, 0))
         
-        self.csv_label = tk.Label(csv_row, text="No file selected",
+        self.markers_label = tk.Label(csv_row, text="No file selected",
                                  font=("Segoe UI", 9), bg="#2D2D2D", fg="#888888",
                                  anchor='w')
-        self.csv_label.pack(side='left', fill='x', expand=True)
+        self.markers_label.pack(side='left', fill='x', expand=True)
         
-        StyledButton(csv_row, "Browse", command=self._choose_csv,
+        StyledButton(csv_row, "Browse", command=self._choose_markers_csv,
+                      width=90, height=30, corner_radius=8,
+                      font=("Segoe UI", 9, "bold")).pack(side='right')
+        
+        # Clips CSV file card
+        clips_card = RoundedCard(self.root, bg="#2D2D2D")
+        clips_card.pack(fill='x', padx=25, pady=5)
+        
+        tk.Label(clips_card, text="🎬 Clips CSV File (Optional)", font=("Segoe UI", 11, "bold"),
+                bg="#2D2D2D", fg=fg).pack(anchor='w')
+        
+        clips_row = tk.Frame(clips_card, bg="#2D2D2D")
+        clips_row.pack(fill='x', pady=(5, 0))
+        
+        self.clips_label = tk.Label(clips_row, text="No file selected",
+                                   font=("Segoe UI", 9), bg="#2D2D2D", fg="#888888",
+                                   anchor='w')
+        self.clips_label.pack(side='left', fill='x', expand=True)
+        
+        StyledButton(clips_row, "Browse", command=self._choose_clips_csv,
                       width=90, height=30, corner_radius=8,
                       font=("Segoe UI", 9, "bold")).pack(side='right')
         
@@ -522,20 +570,30 @@ class TwitchMarkersWithVideoGUI:
         help_text = (
             "CSV format: timestamp,role,username,description(optional)\n"
             "Example: 4:08:26,Broadcaster,StreamerJoe,Epic moment!\n\n"
-            "The XML will contain your video with its audio on the timeline,\n"
-            "plus all markers positioned at the correct timestamps."
+            "Markers will appear as BLUE, Clips as ORANGE on the timeline.\n"
+            "The XML will contain your video with its audio and all markers/clips."
         )
         tk.Label(help_card, text=help_text, font=("Segoe UI", 8),
                 bg="#2D2D2D", fg="#666666", justify='left').pack(anchor='w')
     
-    def _choose_csv(self):
+    def _choose_markers_csv(self):
         path = filedialog.askopenfilename(
             title="Choose Twitch Markers CSV",
             filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
         )
         if path:
-            self.csv_path = path
-            self.csv_label.config(text=os.path.basename(path), fg="#E0E0E0")
+            self.markers_csv_path = path
+            self.markers_label.config(text=os.path.basename(path), fg="#E0E0E0")
+            self.status_label.config(text="")
+    
+    def _choose_clips_csv(self):
+        path = filedialog.askopenfilename(
+            title="Choose Twitch Clips CSV (Optional)",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+        )
+        if path:
+            self.clips_csv_path = path
+            self.clips_label.config(text=os.path.basename(path), fg="#E0E0E0")
             self.status_label.config(text="")
     
     def _choose_video(self):
@@ -571,42 +629,53 @@ class TwitchMarkersWithVideoGUI:
                 self.status_label.config(text="", fg="#888888")
     
     def _convert(self):
-        if not self.csv_path:
-            messagebox.showwarning("Missing File", "Please select a CSV markers file.")
+        if not self.markers_csv_path:
+            messagebox.showwarning("Missing File", "Please select a Markers CSV file.")
             return
         if not self.video_path:
             messagebox.showwarning("Missing File", "Please select a video file.")
             return
         
-        # Generate output path next to CSV
-        csv_dir = os.path.dirname(self.csv_path)
-        csv_stem = Path(self.csv_path).stem
-        output_path = os.path.join(csv_dir, f"{csv_stem}_with_video.xml")
+        # Generate output path next to markers CSV
+        csv_dir = os.path.dirname(self.markers_csv_path)
+        csv_stem = Path(self.markers_csv_path).stem
+        if csv_stem.lower() == "markers":
+            # If markers.csv, replace with combined name
+            output_stem = "markers_and_clips" if self.clips_csv_path else "markers"
+        else:
+            output_stem = csv_stem + ("_and_clips" if self.clips_csv_path else "")
+        output_path = os.path.join(csv_dir, f"{output_stem}_with_video.xml")
         
         self.status_label.config(text="Generating XML...", fg="#F39C12")
         self.root.update()
         
         try:
             num_markers, video_info = self.converter.generate_xml(
-                self.csv_path, self.video_path, output_path
+                self.markers_csv_path, self.video_path, output_path,
+                clips_csv_path=self.clips_csv_path
             )
             
             audio_status = "with audio" if video_info['has_audio'] else "without audio"
             self.status_label.config(
-                text=f"✅ Done! {num_markers} markers + video ({audio_status}) → {os.path.basename(output_path)}",
+                text=f"✅ Done! {num_markers} items + video ({audio_status}) → {os.path.basename(output_path)}",
                 fg="#2ECC71"
             )
+            
+            clip_info = f"Clips: {len([m for m in self.converter.read_markers_and_clips(self.markers_csv_path, self.clips_csv_path) if m['type'] == 'clip'])}\n" if self.clips_csv_path else ""
+            marker_info = f"Markers: {len([m for m in self.converter.read_markers_and_clips(self.markers_csv_path, self.clips_csv_path) if m['type'] == 'marker'])}\n" if self.markers_csv_path else ""
             
             messagebox.showinfo(
                 "Success!",
                 f"XML created successfully!\n\n"
                 f"📄 {output_path}\n\n"
-                f"Markers: {num_markers}\n"
+                f"{marker_info}{clip_info}"
+                f"Total: {num_markers} items\n"
                 f"Video: {video_info['width']}x{video_info['height']} @ {video_info['fps']}fps\n"
                 f"Audio: {'Yes (' + str(video_info['audio_channels']) + ' channels)' if video_info['has_audio'] else 'No audio detected'}\n\n"
+                f"Colors: 🔵 BLUE = Markers | 🟠 ORANGE = Clips\n\n"
                 f"Import in DaVinci Resolve:\n"
                 f"File → Import → Timeline → Import AAF, EDL, XML...\n\n"
-                f"The video with its audio and all markers will be on the timeline!"
+                f"The video with its audio and all markers/clips will be on the timeline!"
             )
         except Exception as e:
             self.status_label.config(text=f"❌ Error: {e}", fg="#E74C3C")
@@ -620,29 +689,52 @@ class TwitchMarkersWithVideoGUI:
 
 def cli_mode():
     if len(sys.argv) < 3:
-        print("Usage: python3 twitch_markers_with_video_gui.py <markers.csv> <video_file>")
+        print("Usage: python3 twitch_markers_with_video_gui.py <markers.csv> <video_file> [clips.csv] [output.xml]")
         print("       python3 twitch_markers_with_video_gui.py   (launches GUI)")
+        print("\nExample:")
+        print("  python3 twitch_markers_with_video_gui.py markers.csv video.mp4")
+        print("  python3 twitch_markers_with_video_gui.py markers.csv video.mp4 clips.csv")
         sys.exit(1)
     
-    csv_path = sys.argv[1]
+    markers_csv_path = sys.argv[1]
     video_path = sys.argv[2]
-    output_path = sys.argv[3] if len(sys.argv) > 3 else None
+    clips_csv_path = sys.argv[3] if len(sys.argv) > 3 and sys.argv[3].endswith('.csv') else None
     
-    if not os.path.exists(csv_path):
-        print(f"Error: CSV file not found: {csv_path}")
+    # Find output path
+    output_path = None
+    for i in range(3, len(sys.argv)):
+        if not sys.argv[i].endswith('.csv'):
+            output_path = sys.argv[i]
+            break
+    
+    if not os.path.exists(markers_csv_path):
+        print(f"Error: Markers CSV file not found: {markers_csv_path}")
         sys.exit(1)
     if not os.path.exists(video_path):
         print(f"Error: Video file not found: {video_path}")
         sys.exit(1)
+    if clips_csv_path and not os.path.exists(clips_csv_path):
+        print(f"Error: Clips CSV file not found: {clips_csv_path}")
+        sys.exit(1)
     
     if not output_path:
-        output_path = str(Path(csv_path).with_suffix('')) + "_with_video.xml"
+        if clips_csv_path:
+            output_path = str(Path(markers_csv_path).with_stem(Path(markers_csv_path).stem + "_and_clips")) + "_with_video.xml"
+        else:
+            output_path = str(Path(markers_csv_path).with_suffix('')) + "_with_video.xml"
     
     converter = TwitchMarkersWithVideoConverter()
-    num_markers, video_info = converter.generate_xml(csv_path, video_path, output_path)
+    num_markers, video_info = converter.generate_xml(markers_csv_path, video_path, output_path, clips_csv_path=clips_csv_path)
+    
+    # Count markers and clips
+    all_items = converter.read_markers_and_clips(markers_csv_path, clips_csv_path)
+    markers_count = len([m for m in all_items if m['type'] == 'marker'])
+    clips_count = len([m for m in all_items if m['type'] == 'clip'])
     
     print(f"✅ Created {output_path}")
-    print(f"   {num_markers} markers | {video_info['width']}x{video_info['height']} @ {video_info['fps']}fps")
+    print(f"   Markers: {markers_count} (BLUE)")
+    print(f"   Clips: {clips_count} (ORANGE)")
+    print(f"   Video: {video_info['width']}x{video_info['height']} @ {video_info['fps']}fps")
     print(f"   Audio: {'Yes (' + str(video_info['audio_channels']) + 'ch)' if video_info['has_audio'] else 'No'}")
     print(f"\nImport in DaVinci Resolve: File → Import → Timeline → Import AAF, EDL, XML...")
 
