@@ -1,0 +1,39 @@
+#!/bin/bash
+# Twitch Markers → DaVinci Resolve — app launcher.
+# Runs the GUI script embedded in the bundle (installed via install.sh),
+# falling back to a copy next to the .app for development checkouts.
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT="$HERE/../Resources/twitch_markers_app.py"
+[ -f "$SCRIPT" ] || SCRIPT="$HERE/../../../twitch_markers_app.py"
+
+fail() {
+    osascript -e "display dialog \"$1\" buttons {\"OK\"} default button 1 with title \"Twitch Markers\" with icon caution" >/dev/null 2>&1
+    exit 1
+}
+
+[ -f "$SCRIPT" ] || fail "twitch_markers_app.py not found. Run install.sh from the project folder to rebuild the app."
+
+# Finder apps don't inherit the shell PATH, so probe known Python locations.
+PY=""
+for candidate in /opt/homebrew/bin/python3 /usr/local/bin/python3 \
+                 /Library/Frameworks/Python.framework/Versions/Current/bin/python3 \
+                 /usr/bin/python3 "$(command -v python3 2>/dev/null)"; do
+    if [ -n "$candidate" ] && [ -x "$candidate" ] && "$candidate" -c "import tkinter" >/dev/null 2>&1; then
+        PY="$candidate"
+        break
+    fi
+done
+
+[ -n "$PY" ] || fail "No Python 3 with Tkinter found. Install it with:  brew install python python-tk"
+
+ERR=$("$PY" "$SCRIPT" 2>&1)
+CODE=$?
+if [ $CODE -ne 0 ]; then
+    case "$ERR" in
+        *"Operation not permitted"*)
+            fail "macOS blocked file access. Install the app properly by running install.sh from the project folder, then launch it from Applications." ;;
+        *)
+            fail "The app failed to start: $(printf '%s' "$ERR" | tail -c 300 | tr '"' "'")" ;;
+    esac
+fi
